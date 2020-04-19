@@ -1,0 +1,163 @@
+#!/usr/bin/env python
+import argparse
+import subprocess
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional, List
+
+
+class GitCalendar:
+    _author: Optional[str]
+    _paths: Optional[List[str]]
+    _first_day: datetime
+    _last_day: datetime
+
+    def __init__(self, author: Optional[str] = None, paths: Optional[List[str]] = None):
+        self._author = author
+        self._paths = paths
+
+        now = datetime.now()
+        self._set_first_sunday(now)
+        self._last_day = datetime.now()
+
+    def _set_first_sunday(self, now: datetime) -> None:
+        def is_leap_year(year: int) -> bool:
+            return year % 4 == 0 and year % 100 != 0 and year % 400 == 0
+
+        delta = 366 if is_leap_year(now.year) and now.month > 2 else 365
+        one_year_ago = now - timedelta(days=delta)
+        self._first_day = one_year_ago - timedelta(days=one_year_ago.weekday() + 1)
+
+    def _collect_commit_times(self) -> List[int]:
+        def day_of_year(date: datetime) -> int:
+            return (date - datetime(year=date.year, month=1, day=1)).days + 1
+
+        cmd = ['git', 'log', '--no-merges', '--pretty=format:%at', '--since=13 months']
+        if self._author:
+            cmd.append(f'--author={self._author}')
+        if self._paths and len(self._paths) > 0:
+            cmd.append('--')
+            for path in self._paths:
+                if not Path(path).exists():
+                    print(f'Error {path} does not exist', file=sys.stderr)
+                    sys.exit(1)
+
+                cmd.append(path)
+
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE)
+        if proc.returncode != 0:
+            print(f'Failed {cmd}', file=sys.stderr)
+            sys.exit(1)
+
+        epochs = [int(epoch) for epoch in proc.stdout.decode('utf-8').splitlines()]
+        start_day_of_year = day_of_year(self._first_day)
+        start_year = self._first_day.year
+
+        total_days = (self._last_day - self._first_day).days + 1
+        commits: List[int] = []
+        for _ in range(total_days):
+            commits.append(0)
+
+        for epoch in epochs:
+            d = datetime.utcfromtimestamp(epoch)
+            if d.year < start_year:
+                continue
+            dy = day_of_year(d)
+            if d.year == start_year and dy < start_day_of_year:
+                continue
+
+            if dy == start_day_of_year:
+                index = 0
+            else:
+                index = (d - self._first_day).days
+            commits[index] += 1
+
+        return commits
+
+    def display_calendar(self):
+        def normalize_commit_times(commits: List[int]) -> List[float]:
+            max_commits = max(commits)
+            ret: List[float] = []
+            for commit in commits:
+                ret.append(commit / max_commits)
+
+            return ret
+
+        def commit_class(commit: float) -> int:
+            if commit == 0:
+                return 0
+            elif commit < 0.25:
+                return 1
+            elif commit < 0.50:
+                return 2
+            elif commit < 0.75:
+                return 3
+            else:
+                return 4
+
+        def print_commit_square(color_class) -> None:
+            colors = [237, 139, 40, 190, 1]
+            sys.stdout.write(f'\x1b[38;5;{colors[color_class]}m')
+            sys.stdout.write('\u25fc ')
+            sys.stdout.write('\x1b[0m')
+
+        delta = (self._last_day - self._first_day).days + 1
+        weeks = delta // 7
+        if delta % 7 != 0:
+            weeks += 1
+
+        month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        start = self._first_day
+
+        sys.stdout.write('    ')
+        sys.stdout.write(month_names[start.month - 1])
+        month_week = start.day // 7
+        if start.day % 7 != 0:
+            month_week += 1
+
+        sys.stdout.write(' ' * (4 - month_week))
+
+        months: List[str] = []
+        for i in range(12):
+            months.append(month_names[(start.month + i) % 12])
+
+        sys.stdout.write('      '.join(months))
+        sys.stdout.write("\n")
+
+        commit_times = self._collect_commit_times()
+        normalized = normalize_commit_times(commit_times)
+        limit = len(commit_times)
+        for weekday in range(7):
+            if weekday == 1:
+                sys.stdout.write('Mon ')
+            elif weekday == 3:
+                sys.stdout.write('Wed ')
+            elif weekday == 5:
+                sys.stdout.write('Fri ')
+            else:
+                sys.stdout.write('    ')
+
+            for week in range(weeks):
+                index = weekday + week * 7
+                if index >= limit:
+                    break
+
+                color = commit_class(normalized[index])
+                print_commit_square(color)
+
+            sys.stdout.write("\n")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description='git-cal in Python')
+    parser.add_argument('-a', '--author', type=str, help='Commit Author')
+    parser.add_argument('paths', nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+
+    cal = GitCalendar(author=args.author, paths=args.paths)
+    cal.display_calendar()
+
+
+if __name__ == '__main__':
+    main()
